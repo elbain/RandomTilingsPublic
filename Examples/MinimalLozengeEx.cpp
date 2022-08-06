@@ -15,6 +15,7 @@ int main() {
 	int N = 10; int M = 2; 
 	int Nsteps = 1000;
 
+#ifndef __NVCC__
 	cl::Context context(CL_DEVICE_TYPE_DEFAULT);
 	std::string sinfo;
 	std::vector<cl::Device> devices;
@@ -23,6 +24,7 @@ int main() {
 	std::cout<<"Created context using: "<<sinfo<<std::endl;
 	cl::CommandQueue queue(context);
 	cl_int err = 0;
+#endif
 
 	// Create a domain, and draw it out. See LozengeTiler.h for a description
 	// of domains for lozenge tilings.
@@ -35,8 +37,17 @@ int main() {
 	LozengeTiler::TilingToSVG(t, "./Examples/ExampleOuts/MinimalLozenge/tilingStartAlmostHex.svg");
 	
 	//Set up MCMC
+#ifndef __NVCC__
 	LozengeTiler L(context, queue, devices, "./src/lozenge/lozengekernel.cl", err);
 	L.LoadTinyMT("./src/TinyMT/tinymt32dc.0.1048576.txt", t.size());
+#else 
+	LozengeTiler L;
+
+	// load the MTGP random number generators
+	L.LoadMTGP();
+	std::cout << "Loaded MTGP" << std::endl;
+#endif 
+
 	std::random_device seed;
 
 	//Walk

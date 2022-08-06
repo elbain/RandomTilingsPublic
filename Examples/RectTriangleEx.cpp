@@ -14,6 +14,7 @@ int main() {
     std::cout<<"Running Rectangle-Triangle Tiling Test Example."<<std::endl;
     auto start = std::chrono::steady_clock::now();
     
+#ifndef __NVCC__
     //Standard OpenCL set up code.
     cl::Context context(CL_DEVICE_TYPE_DEFAULT);
     std::string sinfo;
@@ -22,6 +23,7 @@ int main() {
     devices[0].getInfo(CL_DEVICE_NAME, &sinfo);
     cl::CommandQueue queue(context);
     cl_int err = 0;
+#endif
     
     //Create starting tilestate
     tiling tMax = RectTriangleTiler::maxHex(N);
@@ -35,8 +37,17 @@ int main() {
     RectTriangleTiler::TilingToSVG(tSlope,"./Examples/ExampleOuts/RectTriangle/SlopeTiling.svg");
     
     //Set Up mcmc
+#ifndef __NVCC__
     RectTriangleTiler R(context, queue, devices, "./src/RectTriangle/recttrianglekernel.cl", err);
     R.LoadTinyMT("./src/TinyMT/tinymt32dc.0.1048576.txt", tMin.size());
+#else 
+// make the tiler
+    RectTriangleTiler R;
+
+    // load the MTGP random number generators
+    R.LoadMTGP();
+    std::cout << "Loaded MTGP" << std::endl;
+#endif 
     std::random_device seed;
     
     //Walk

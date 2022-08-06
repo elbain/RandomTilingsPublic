@@ -1,38 +1,75 @@
 #include "DominoTiler.h"
 #include "../common/common.h"
+#ifndef __NVCC__
 #include "../TinyMT/file_reader.h"
+#else
+#include <cuda_runtime.h>
+#include <curand.h>
+#include "dominokernel.cuh"
+#include "../common/helper_cuda.h"
+#include <curand_mtgp32_host.h>
+#include <curand_mtgp32dc_p_11213.h>
+#endif
 
 /*
  * These are the core functions.
  */
 
-void DominoTiler::Walk(tiling &t, long steps, long seed) {
+void DominoTiler::Walk(tiling& t, long steps, long seed) {
+
 	int N = std::sqrt(t.size());
 
-	if ( N % 2 != 0 ) std::cout<<"Careful! The tiling has odd dimension."<<std::endl;
+	if (N % 2 != 0) std::cout << "Careful! The tiling has odd dimension." << std::endl;
 
 	// Break up the tiling into the black and white sub-arrays
-	std::vector<char> h_vW((N/2)*N,0);
-	std::vector<char> h_vB((N/2)*N,0);
+	std::vector<char> h_vW((N / 2) * N, 0);
+	std::vector<char> h_vB((N / 2) * N, 0);
 
-	for(int i=0; i < N ; ++i) {
-		for(int j=0; j < N; ++j) {
-			if ((i+j)%2==0) h_vB[i*(N/2)+(j/2)] = t[i*N+j];
-			else  h_vW[i*(N/2)+(j/2)] = t[i*N+j];
+	for (int i = 0; i < N; ++i) {
+		for (int j = 0; j < N; ++j) {
+			if ((i + j) % 2 == 0) h_vB[i * (N / 2) + (j / 2)] = t[i * N + j];
+			else  h_vW[i * (N / 2) + (j / 2)] = t[i * N + j];
 		}
 	}
 
+
 	// Load the arrays to the device.
+#ifndef __NVCC__
 	cl::Buffer d_vW = cl::Buffer(context, h_vW.begin(), h_vW.end(), CL_FALSE);
 	cl::Buffer d_vB = cl::Buffer(context, h_vB.begin(), h_vB.end(), CL_FALSE);
+#else
+	char* d_vW;
+	char* d_vB;
+	checkCudaErrors(cudaMalloc((void**)&d_vW, (N / 2) * N * sizeof(char)));
+	checkCudaErrors(cudaMemcpy(d_vW, h_vW.data(), (N / 2) * N * sizeof(char), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMalloc((void**)&d_vB, (N / 2) * N * sizeof(char)));
+	checkCudaErrors(cudaMemcpy(d_vB, h_vB.data(), (N / 2) * N * sizeof(char), cudaMemcpyHostToDevice));
+#endif
 
 
 	// Initialize the PRNGs.
 	std::mt19937 mt_rand(seed);
-	InitTinyMT( cl::EnqueueArgs(queue, cl::NDRange(N*N/2)), tinymtparams, mt_rand());
+#ifndef __NVCC__
+	InitTinyMT(cl::EnqueueArgs(queue, cl::NDRange(N * N / 2)), tinymtparams, mt_rand());
+#else
+	int total_dim_x = N - 2;
+	int total_dim_y = N / 2 - 2;
+	int grid_x = (total_dim_x + BLOCK_DIM - 1) / BLOCK_DIM;
+	int grid_y = (total_dim_y + BLOCK_DIM - 1) / BLOCK_DIM;
+	dim3 block_size = dim3(BLOCK_DIM, BLOCK_DIM);
+	dim3 grid_size = dim3(grid_x, grid_y, 1);
+	int num_states = grid_x*grid_y;
+	checkCudaErrors(cudaMalloc((void**)&devMTGPStates, num_states * sizeof(curandStateMtgp32)));
+	for (int i = 0; i < num_states; i++) {
+		checkCudaErrors(curandMakeMTGP32KernelState(devMTGPStates + i, mtgp32dc_params_fast_11213, devKernelParams, 1, seed + i));
+	}
+
+#endif
 
 	for(int i=0; i < steps; ++i) {
 		int r = mt_rand()%2;
+
+#ifndef __NVCC__
 		if (r==1) {
 			RotateTiles( cl::EnqueueArgs( queue, cl::NDRange(N-2,N/2-2)), tinymtparams, d_vB, N, 1);
 			UpdateTiles( cl::EnqueueArgs(queue, cl::NDRange(N-2,N/2-2)), d_vW, d_vB, N, 1);
@@ -40,11 +77,34 @@ void DominoTiler::Walk(tiling &t, long steps, long seed) {
 			RotateTiles( cl::EnqueueArgs( queue, cl::NDRange(N-2,N/2-2)), tinymtparams, d_vW, N, 0);
 			UpdateTiles( cl::EnqueueArgs(queue, cl::NDRange(N-2,N/2-2)), d_vB, d_vW, N, 0);
 		}
+		if (!(i % 100000) && i!=0) {
+			queue.finish();
+			std::cout << "Walk step " << i << std::endl;
+		}
+		else if (!(i % 10000) && i != 0) {
+			queue.flush();
+		}
+#else
+		if (r == 1) {
+			RotateTiles(block_size, grid_size, devMTGPStates, d_vB, N, 1);
+			UpdateTiles(block_size, grid_size, d_vW, d_vB, N, 1);
+		}
+		else {
+			RotateTiles(block_size, grid_size, devMTGPStates, d_vW, N, 0);
+			UpdateTiles(block_size, grid_size, d_vB, d_vW, N, 0);
+		}
+#endif
 	}
 
 	// Load back the tilings.
+#ifndef __NVCC__
 	cl::copy(queue, d_vW, h_vW.begin(), h_vW.end());
 	cl::copy(queue, d_vB, h_vB.begin(), h_vB.end());
+#else
+	checkCudaErrors(cudaMemcpy(h_vW.data(), d_vW, (N / 2) * N * sizeof(char), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(h_vB.data(), d_vB, (N / 2) * N * sizeof(char), cudaMemcpyDeviceToHost));
+#endif
+
 
 	for(int i=0; i< N; ++i) {
 		for(int j=0; j<N; ++j) {
@@ -52,6 +112,13 @@ void DominoTiler::Walk(tiling &t, long steps, long seed) {
 			else t[i*N+j] = h_vW[i*(N/2)+(j/2)];
 		}
 	}
+
+#ifdef __NVCC__
+	checkCudaErrors(cudaFree(d_vB));
+	checkCudaErrors(cudaFree(d_vW));
+	checkCudaErrors(cudaFree(devMTGPStates));
+#endif
+
 }
 
 
@@ -73,28 +140,81 @@ void DominoTiler::Walk(tiling &t, std::vector<long> steps, std::vector<long> see
 		}
 	}
 
+#ifndef __NVCC__
 	cl::Buffer d_vW = cl::Buffer(context, h_vW.begin(), h_vW.end(), CL_FALSE);
 	cl::Buffer d_vB = cl::Buffer(context, h_vB.begin(), h_vB.end(), CL_FALSE);
+#else
+	char* d_vW;
+	char* d_vB;
+	checkCudaErrors(cudaMalloc((void**)&d_vW, (N / 2) * N * sizeof(char)));
+	checkCudaErrors(cudaMemcpy(d_vW, h_vW.data(), (N / 2) * N * sizeof(char), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMalloc((void**)&d_vB, (N / 2) * N * sizeof(char)));
+	checkCudaErrors(cudaMemcpy(d_vB, h_vB.data(), (N / 2) * N * sizeof(char), cudaMemcpyHostToDevice));
+#endif
 
 	for (int k = 0; k < steps.size(); ++k) {
 
 		std::mt19937 mt_rand(seeds[k]);
-		InitTinyMT( cl::EnqueueArgs(queue, cl::NDRange(N*N/2)), tinymtparams, seeds[k]);
+#ifndef __NVCC__
+		InitTinyMT(cl::EnqueueArgs(queue, cl::NDRange(N * N / 2)), tinymtparams, seeds[k]);
+#else
+		int total_dim_x = N - 2;
+		int total_dim_y = N / 2 - 2;
+		int grid_x = (total_dim_x + BLOCK_DIM - 1) / BLOCK_DIM;
+		int grid_y = (total_dim_y + BLOCK_DIM - 1) / BLOCK_DIM;
+		dim3 block_size = dim3(BLOCK_DIM, BLOCK_DIM);
+		dim3 grid_size = dim3(grid_x, grid_y, 1);
+		int num_states = grid_x * grid_y;
+		checkCudaErrors(cudaMalloc((void**)&devMTGPStates, num_states * sizeof(curandStateMtgp32)));
+		for (int i = 0; i < num_states; i++) {
+			checkCudaErrors(curandMakeMTGP32KernelState(devMTGPStates + i, mtgp32dc_params_fast_11213, devKernelParams, 1, seeds[k] + i));
+		}
+
+#endif
 
 		for(int i=0; i < steps[k]; ++i) {
 			int r = mt_rand()%2;
-			if (r==1) {
-				RotateTiles( cl::EnqueueArgs( queue, cl::NDRange(N-2,N/2-2)), tinymtparams, d_vB, N, 1);
-				UpdateTiles( cl::EnqueueArgs(queue, cl::NDRange(N-2,N/2-2)), d_vW, d_vB, N, 1);
-			} else {
-				RotateTiles( cl::EnqueueArgs( queue, cl::NDRange(N-2,N/2-2)), tinymtparams, d_vW, N, 0);
-				UpdateTiles( cl::EnqueueArgs(queue, cl::NDRange(N-2,N/2-2)), d_vB, d_vW, N, 0);
+
+#ifndef __NVCC__
+			if (r == 1) {
+				RotateTiles(cl::EnqueueArgs(queue, cl::NDRange(N - 2, N / 2 - 2)), tinymtparams, d_vB, N, 1);
+				UpdateTiles(cl::EnqueueArgs(queue, cl::NDRange(N - 2, N / 2 - 2)), d_vW, d_vB, N, 1);
 			}
+			else {
+				RotateTiles(cl::EnqueueArgs(queue, cl::NDRange(N - 2, N / 2 - 2)), tinymtparams, d_vW, N, 0);
+				UpdateTiles(cl::EnqueueArgs(queue, cl::NDRange(N - 2, N / 2 - 2)), d_vB, d_vW, N, 0);
+			}
+			if (!(i % 100000) && i != 0) {
+				queue.finish();
+				std::cout << "Walk step " << i << std::endl;
+			}
+			else if (!(i % 10000) && i != 0) {
+				queue.flush();
+			}
+#else
+			if (r == 1) {
+				RotateTiles(block_size, grid_size, devMTGPStates, d_vB, N, 1);
+				UpdateTiles(block_size, grid_size, d_vW, d_vB, N, 1);
+			}
+			else {
+				RotateTiles(block_size, grid_size, devMTGPStates, d_vW, N, 0);
+				UpdateTiles(block_size, grid_size, d_vB, d_vW, N, 0);
+			}
+#endif
+			
 		}
+#ifdef __NVCC__
+		checkCudaErrors(cudaFree(devMTGPStates));
+#endif
 	}
 
+#ifndef __NVCC__
 	cl::copy(queue, d_vW, h_vW.begin(), h_vW.end());
 	cl::copy(queue, d_vB, h_vB.begin(), h_vB.end());
+#else
+	checkCudaErrors(cudaMemcpy(h_vW.data(), d_vW, (N / 2) * N * sizeof(char), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(h_vB.data(), d_vB, (N / 2) * N * sizeof(char), cudaMemcpyDeviceToHost));
+#endif
 
 	for(int i=0; i< N; ++i) {
 		for(int j=0; j<N; ++j) {
@@ -104,12 +224,23 @@ void DominoTiler::Walk(tiling &t, std::vector<long> steps, std::vector<long> see
 				t[i*N+j] = h_vW[i*(N/2)+(j/2)];
 		}
 	}
+#ifdef __NVCC__
+	checkCudaErrors(cudaFree(d_vB));
+	checkCudaErrors(cudaFree(d_vW));
+#endif
 }
 
+
+#ifndef __NVCC__
 void DominoTiler::LoadTinyMT(std::string params, int size) {
 	tinymtparams = get_params_buffer(params, context, queue, size);
 }
-
+#else
+void DominoTiler::LoadMTGP() {
+	checkCudaErrors(cudaMalloc((void**)&devKernelParams, sizeof(mtgp32_kernel_params)));
+	checkCudaErrors(curandMakeMTGP32Constants(mtgp32dc_params_fast_11213, devKernelParams));
+}
+#endif
 
 /*
  * Some common domains
@@ -399,6 +530,7 @@ tiling DominoTiler::MinTiling(const domain &d) {
 	return HeightfuncToTiling(hf,d);
 }
 
+
 tiling DominoTiler::HeightfuncToTiling(const heightfunc &hf, const domain &d) {
 	int N = sqrt(hf.size());
 
@@ -621,6 +753,7 @@ void DominoTiler::TilingToSVG(const tiling &t, std::string filename) {
 	outputFile << "<g id=\"h2\">  <polygon points = \"-1,0 -1,-1 1,-1 1,0\" fill=\"white\" stroke=\"black\" stroke-width=\".05\"/> </g>\n";
 	outputFile << "<g id=\"v2\">  <polygon points = \"-1,-1 0,-1 0,1 -1,1\" fill=\"white\" stroke=\"black\" stroke-width=\".05\"/> </g>\n";
 
+
 	outputFile << "</defs>\n";
 
 	for (int i = 0; i < N; ++i) {
@@ -635,6 +768,7 @@ void DominoTiler::TilingToSVG(const tiling &t, std::string filename) {
 				if ( (t[i*N+j]  & 4) == 4) outputFile<<"<use xlink:href = \"#v2\" x = \""<<x<<"\" y = \""<<y<<"\"/>\n";
 			}}
 	}
+
 	outputFile<< "</svg>";
 	outputFile.close();
 }
@@ -679,3 +813,4 @@ void DominoTiler::MayaToSVG(const tiling &t, std::string filename) {
 	outputFile<< "</svg>";
 	outputFile.close();
 }
+

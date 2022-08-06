@@ -39,10 +39,14 @@
 
 
 #include "../common/common.h"
+#ifdef __NVCC__
+#include <curand_mtgp32.h>
+#endif
 
 class DominoTiler {
 
 private:
+#ifndef __NVCC__
 	cl::Context context;
 	cl::CommandQueue queue;
 	cl::Program program;
@@ -50,6 +54,10 @@ private:
     cl::make_kernel<cl::Buffer, cl::Buffer, const int, const int> RotateTiles;
     cl::make_kernel<cl::Buffer, cl::Buffer, const int, const int> UpdateTiles;
 	cl::Buffer tinymtparams;
+#else
+    mtgp32_kernel_params* devKernelParams;
+    curandStateMtgp32* devMTGPStates;
+#endif
 
 public:
 
@@ -58,6 +66,7 @@ public:
 	 */
 
 	// The constructor takes care of loading and compiling the program source.
+#ifndef __NVCC__
     DominoTiler(cl::Context context0, cl::CommandQueue queue0, std::vector<cl::Device> devices, std::string source, cl_int &err) :
     	context(context0),
 		queue(queue0),
@@ -65,14 +74,21 @@ public:
 		InitTinyMT(program, "InitTinyMT"),
 		RotateTiles(program, "RotateTiles"),
 		UpdateTiles(program, "UpdateTiles") { };
+#else
+	DominoTiler() = default;
+#endif
 
+#ifndef __NVCC__
     // Loads TinyMT parameters.
     void LoadTinyMT(std::string params, int size);
+#else 
+    void LoadMTGP();
+#endif
 
     // Random Walk the tiling for STEPS steps with seed SEED.
     void Walk(tiling &t, long steps, long seed);
 
-    // Random Walk the tiling with a vector of steps, and a vector of seeds.
+    // Random Walk the tiling with a vector of steps, and a vector of seeds. 
     void Walk(tiling &t, std::vector<long> steps, std::vector<long> seeds);
 
     /*

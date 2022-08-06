@@ -11,6 +11,7 @@
 int main() {
 	std::cout<<"Running Domino, Basic Example."<<std::endl;
 	
+#ifndef __NVCC__
 	// Standard OpenCL set up code.
 	cl::Context context(CL_DEVICE_TYPE_DEFAULT);
 	std::string sinfo;
@@ -20,6 +21,7 @@ int main() {
 	std::cout<<"Created context using: "<<sinfo<<std::endl; // Check which GPU you use!
 	cl::CommandQueue queue(context);
 	cl_int err = 0; // if something fails, look at this error code
+#endif
 
 	// It's usually easier to draw a domain, and then let Thurston's algorithm
 	// do the work to generate a tiling. But for simplicity, I'll write out the tiling
@@ -43,12 +45,20 @@ int main() {
 	DominoTiler::TilingToSVG(T, "./Examples/ExampleOuts/MinimalDomino/StartTiling.svg");
 
 	
-	
+#ifndef __NVCC__
 	// make the tiler, which loads the kernel source and compiles it for the device.
 	DominoTiler D(context, queue, devices, "./src/domino/dominokernel.cl", err);
 	
 	// load the tinyMT parameters, for random number generators
 	D.LoadTinyMT("./src/TinyMT/tinymt32dc.0.1048576.txt", T.size()/2);
+#else 
+	// make the tiler
+	DominoTiler D;
+
+	// load the MTGP random number generators
+	D.LoadMTGP();
+	std::cout << "Loaded MTGP" << std::endl;
+#endif 
 
 	// Random walk for 100 steps with seed 34893.
 	D.Walk(T, 100, 34893);

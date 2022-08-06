@@ -15,6 +15,7 @@ int main() {
     std::cout<<"Running basic Dimer on Triangular Lattice example."<<std::endl;
     auto start = std::chrono::steady_clock::now();
     
+#ifndef __NVCC__
     //Standard OpenCL set up code.
     //PrintOpenCLInfo(); // Look at what devices are available
     cl::Context context(CL_DEVICE_TYPE_DEFAULT);
@@ -24,6 +25,7 @@ int main() {
     devices[0].getInfo(CL_DEVICE_NAME, &sinfo);
     cl::CommandQueue queue(context);
     cl_int err = 0;
+#endif
     
     //Create domain and starting tiling and draw them.
     tiling t = TriangleDimerTiler::IceCreamCone(N,0);
@@ -36,8 +38,17 @@ int main() {
     
     
     //Set up the mcmc.
+#ifndef __NVCC__
     TriangleDimerTiler T(context, queue, devices, "./src/TriangleDimer/triangledimerkernel.cl", err);
     T.LoadTinyMT("./src/TinyMT/tinymt32dc.0.1048576.txt", t.size());
+#else 
+// make the tiler
+    TriangleDimerTiler T;
+
+    // load the MTGP random number generators
+    T.LoadMTGP();
+    std::cout << "Loaded MTGP" << std::endl;
+#endif 
     
     //Walk.
     std::random_device seed;

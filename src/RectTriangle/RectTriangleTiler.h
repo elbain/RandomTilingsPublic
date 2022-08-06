@@ -11,6 +11,9 @@
 #define RectTriangle_RectTriangleTiler_h
 
 #include "../common/common.h"
+#ifdef __NVCC__
+#include <curand_mtgp32.h>
+#endif
 
 
 // Tiling is stored on vertices of the triangular lattice. Each adjacent face if given a integer value in [0,15] based on how it is covered by the tiling. These values are stored as a six digit hexidecimal int as follows:
@@ -30,6 +33,7 @@
 class RectTriangleTiler {
     
 private:
+#ifndef __NVCC__
     cl::Context context;
     cl::CommandQueue queue;
     cl::Program program;
@@ -38,10 +42,15 @@ private:
     cl::make_kernel<cl::Buffer, cl::Buffer, const int, const int> updateTiles1;
     cl::make_kernel<cl::Buffer, cl::Buffer, const int, const int> updateTiles2;
     cl::Buffer tinymtparams;
+#else
+    mtgp32_kernel_params* devKernelParams;
+    curandStateMtgp32* devMTGPStates;
+#endif
     
 public:
     
     // The constructor takes care of loading and compiling the program source.
+#ifndef __NVCC__
     RectTriangleTiler(cl::Context context0, cl::CommandQueue queue0, std::vector<cl::Device> devices, std::string source, cl_int &err) :
     context(context0),
     queue(queue0),
@@ -50,9 +59,16 @@ public:
     flipTiles(program, "flipTiles"),
     updateTiles1(program, "updateTiles1"),
     updateTiles2(program, "updateTiles2") { };
+#else
+    RectTriangleTiler() = default;
+#endif
     
+#ifndef __NVCC__
     // Load TinyMT
     void LoadTinyMT(std::string params, int size);
+#else 
+void LoadMTGP();
+#endif
     
     // Random Walk
     void Walk(tiling &t, int steps, long seed);

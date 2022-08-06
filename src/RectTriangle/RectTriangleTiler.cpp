@@ -7,12 +7,28 @@
 
 #include "RectTriangleTiler.h"
 #include "../common/common.h"
+#ifndef __NVCC__
 #include "../TinyMT/file_reader.h"
+#else
+#include <cuda_runtime.h>
+#include <curand.h>
+#include "recttrianglekernel.cuh"
+#include "../common/helper_cuda.h"
+#include <curand_mtgp32_host.h>
+#include <curand_mtgp32dc_p_11213.h>
+#endif
 
 
+#ifndef __NVCC__
 void RectTriangleTiler::LoadTinyMT(std::string params, int size) {
     tinymtparams = get_params_buffer(params, context, queue, size);
 }
+#else
+void RectTriangleTiler::LoadMTGP() {
+    checkCudaErrors(cudaMalloc((void**)&devKernelParams, sizeof(mtgp32_kernel_params)));
+    checkCudaErrors(curandMakeMTGP32Constants(mtgp32dc_params_fast_11213, devKernelParams));
+}
+#endif
 
 void RectTriangleTiler::Walk(tiling &t, int steps, long seed) {
     int N = std::sqrt(t.size());
@@ -33,21 +49,49 @@ void RectTriangleTiler::Walk(tiling &t, int steps, long seed) {
         }
     }
     
+#ifndef __NVCC__
     // device objects
     cl::Buffer d_vR = cl::Buffer(context, h_vR.begin(), h_vR.end(),CL_FALSE);
     cl::Buffer d_vB = cl::Buffer(context,h_vB.begin(), h_vB.end(),CL_FALSE);
     cl::Buffer d_vG = cl::Buffer(context,h_vG.begin(), h_vG.end(),CL_FALSE);
+#else
+    int* d_vR;
+    int* d_vB;
+    int* d_vG;
+    checkCudaErrors(cudaMalloc((void**)&d_vR, (N / 3) * N * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_vR, h_vR.data(), (N / 3) * N * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc((void**)&d_vB, (N / 3) * N * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_vB, h_vB.data(), (N / 3) * N * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc((void**)&d_vG, (N / 3) * N * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_vG, h_vG.data(), (N / 3) * N * sizeof(int), cudaMemcpyHostToDevice));
+#endif
     
     std::default_random_engine generator;
     std::uniform_int_distribution<int> distribution(0,2);
     generator.seed(seed);
     
+#ifndef __NVCC__
     InitTinyMT( cl::EnqueueArgs(queue, cl::NDRange(N*N/3)), tinymtparams, seed );
+#else
+    int total_dim_x = N;
+    int total_dim_y = N/3;
+    int grid_x = (total_dim_x + BLOCK_DIM - 1) / BLOCK_DIM;
+    int grid_y = (total_dim_y + BLOCK_DIM - 1) / BLOCK_DIM;
+    dim3 block_size = dim3(BLOCK_DIM, BLOCK_DIM);
+    dim3 grid_size = dim3(grid_x, grid_y, 1);
+    int num_states = grid_x * grid_y;
+    checkCudaErrors(cudaMalloc((void**)&devMTGPStates, num_states * sizeof(curandStateMtgp32)));
+    for (int i = 0; i < num_states; i++) {
+        checkCudaErrors(curandMakeMTGP32KernelState(devMTGPStates + i, mtgp32dc_params_fast_11213, devKernelParams, 1, seed + i));
+    }
+
+#endif
     
     int r;
     for(int i = 0; i < steps; ++i) {
         r = distribution(generator);
         //r = 0;
+#ifndef __NVCC__
         if (r%3==0) {
             flipTiles( cl::EnqueueArgs(queue, cl::NDRange(N,N/3)), tinymtparams, d_vR, N);
             updateTiles1( cl::EnqueueArgs(queue, cl::NDRange(N,N/3)), d_vR, d_vB, N, 0);
@@ -61,12 +105,42 @@ void RectTriangleTiler::Walk(tiling &t, int steps, long seed) {
             updateTiles1( cl::EnqueueArgs(queue, cl::NDRange(N,N/3)), d_vG, d_vR, N, 2);
             updateTiles2( cl::EnqueueArgs(queue, cl::NDRange(N,N/3)), d_vG, d_vB, N, 2);
         }
+        if (!(i % 100000) && i != 0) {
+            queue.finish();
+            std::cout << "Walk step " << i << std::endl;
+        }
+        else if (!(i % 10000) && i != 0) {
+            queue.flush();
+        }
+#else
+        if (r%3 == 0) {
+            flipTiles(block_size, grid_size, devMTGPStates, d_vR, N);
+            updateTiles1(block_size, grid_size, d_vR, d_vB, N, 0);
+            updateTiles2(block_size, grid_size, d_vR, d_vG, N, 0);
+        }
+        else if (r%3 == 1) {
+            flipTiles(block_size, grid_size, devMTGPStates, d_vB, N);
+            updateTiles1(block_size, grid_size, d_vB, d_vG, N, 1);
+            updateTiles2(block_size, grid_size, d_vB, d_vR, N, 1);
+        }
+        else {
+            flipTiles(block_size, grid_size, devMTGPStates, d_vG, N);
+            updateTiles1(block_size, grid_size, d_vG, d_vR, N, 2);
+            updateTiles2(block_size, grid_size, d_vG, d_vB, N, 2);
+        }
+#endif
     }
     
     // get memory from device
+#ifndef __NVCC__
     cl::copy(queue, d_vR, h_vR.begin(), h_vR.end());
     cl::copy(queue, d_vB, h_vB.begin(), h_vB.end());
     cl::copy(queue, d_vG, h_vG.begin(), h_vG.end());
+#else
+    checkCudaErrors(cudaMemcpy(h_vR.data(), d_vR, (N / 3)* N * sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_vB.data(), d_vB, (N / 3)* N * sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_vG.data(), d_vG, (N / 3)* N * sizeof(int), cudaMemcpyDeviceToHost));
+#endif
     
     for(int i=0; i<N; ++i) {
         for(int j=0; j<N; ++j) {
@@ -88,7 +162,12 @@ void RectTriangleTiler::Walk(tiling &t, int steps, long seed) {
 //        std::cout<<std::endl;
 //    }
 //    std::cout<<std::dec<<std::endl;
-    
+#ifdef __NVCC__
+    checkCudaErrors(cudaFree(d_vR));
+    checkCudaErrors(cudaFree(d_vB));
+    checkCudaErrors(cudaFree(d_vG));
+    checkCudaErrors(cudaFree(devMTGPStates));
+#endif
 }
 
 tiling RectTriangleTiler::slopeHex(int N) {

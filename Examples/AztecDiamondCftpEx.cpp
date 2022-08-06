@@ -13,6 +13,9 @@ int main() {
 	int N = 5;
 	std::cout<<"Running Aztec Diamond of order "<<N<<" with CFTP."<<std::endl;
 
+	auto start = std::chrono::steady_clock::now();
+
+#ifndef __NVCC__
 	//Standard OpenCL set up code.
 	cl::Context context(CL_DEVICE_TYPE_DEFAULT);
 	std::string sinfo;
@@ -23,6 +26,7 @@ int main() {
 	cl::CommandQueue queue(context);
 
 	cl_int err = 0;
+#endif
 
 	
 	// Make the domain. 
@@ -35,12 +39,17 @@ int main() {
 	tiling tMax = DominoTiler::MaxTiling(d);
 	tiling tMin = DominoTiler::MinTiling(d);
 
+#ifndef __NVCC__
 	DominoTiler D(context, queue, devices, "./src/Domino/dominokernelCFTP.cl", err); // use the CFTP kernel!
 	D.LoadTinyMT("./src/TinyMT/tinymt32dc.0.1048576.txt", tMax.size()/2);
+#else 
+	//To use the CFTP kernel just compile it in the makefile instead of the normal one.
+	DominoTiler D;
+	D.LoadMTGP();
+#endif 
 
 	// Seed the PRNG
 	std::mt19937 mt_rand(345903);
-
 
 	// Coupling from the past, with step sizes increasing by powers of two.
 	std::vector<long> steps; std::vector<long> seeds;
@@ -68,5 +77,11 @@ int main() {
 	}
 	
 	std::cout<<"Finished!"<<std::endl;
+
+	auto end = std::chrono::steady_clock::now();
+	auto diff = end - start;
+	typedef std::chrono::duration<float> float_seconds;
+	auto secs = std::chrono::duration_cast<float_seconds>(diff);
+	std::cout << "Size: " << N << ".  Time elapsed: " << secs.count() << " s." << std::endl;
 }
 

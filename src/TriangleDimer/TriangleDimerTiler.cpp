@@ -8,14 +8,29 @@
 
 #include "TriangleDimerTiler.h"
 #include "../common/common.h"
+#ifndef __NVCC__
 #include "../TinyMT/file_reader.h"
+#else
+#include <cuda_runtime.h>
+#include <curand.h>
+#include "triangledimerkernel.cuh"
+#include "../common/helper_cuda.h"
+#include <curand_mtgp32_host.h>
+#include <curand_mtgp32dc_p_11213.h>
+#endif
 
 
 
-
+#ifndef __NVCC__
 void TriangleDimerTiler::LoadTinyMT(std::string params, int size) {
 	tinymtparams = get_params_buffer(params, context, queue, size);
 }
+#else
+void TriangleDimerTiler::LoadMTGP() {
+    checkCudaErrors(cudaMalloc((void**)&devKernelParams, sizeof(mtgp32_kernel_params)));
+    checkCudaErrors(curandMakeMTGP32Constants(mtgp32dc_params_fast_11213, devKernelParams));
+}
+#endif
 
 std::vector<int> TriangleDimerTiler::DimerIndicator(tiling &t, int c) {
     int N = std::sqrt(t.size());
@@ -218,6 +233,7 @@ void TriangleDimerTiler::Walk(tiling &t, int steps, long seed) {
 //    }
     
     // device arrays
+#ifndef __NVCC__
     cl::Buffer d_eR = cl::Buffer(context, h_eR.begin(), h_eR.end(), CL_FALSE);
     cl::Buffer d_eL = cl::Buffer(context, h_eL.begin(), h_eL.end(), CL_FALSE);
     cl::Buffer d_eH = cl::Buffer(context, h_eH.begin(), h_eH.end(), CL_FALSE);
@@ -226,13 +242,54 @@ void TriangleDimerTiler::Walk(tiling &t, int steps, long seed) {
     cl::Buffer d_bR = cl::Buffer(context, h_bR.begin(), h_bR.end(), CL_FALSE);
     cl::Buffer d_bL = cl::Buffer(context, h_bL.begin(), h_bL.end(), CL_FALSE);
     cl::Buffer d_bH = cl::Buffer(context, h_bH.begin(), h_bH.end(), CL_FALSE);
+#else
+    int* d_eR;
+    int* d_eL;
+    int* d_eH;
+    int* d_tD;
+    int* d_tU;
+    int* d_bR;
+    int* d_bL;
+    int* d_bH;
+    checkCudaErrors(cudaMalloc((void**)&d_eR, N* M * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_eR, h_eR.data(), N* M * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc((void**)&d_eL, N* M * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_eL, h_eL.data(), N* M * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc((void**)&d_eH, N* M * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_eH, h_eH.data(), N* M * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc((void**)&d_tD, N* M * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_tD, h_tD.data(), N* M * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc((void**)&d_tU, N* M * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_tU, h_tU.data(), N* M * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc((void**)&d_bR, N* M * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_bR, h_bR.data(), N* M * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc((void**)&d_bL, N* M * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_bL, h_bL.data(), N* M * sizeof(int), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc((void**)&d_bH, N* M * sizeof(int)));
+    checkCudaErrors(cudaMemcpy(d_bH, h_bH.data(), N* M * sizeof(int), cudaMemcpyHostToDevice));
+#endif
     
     std::default_random_engine generator;
     std::uniform_int_distribution<int> d1(0,2);
     std::uniform_int_distribution<int> d2(0,1);
     generator.seed(seed);
     
+#ifndef __NVCC__
     InitTinyMT( cl::EnqueueArgs(queue, cl::NDRange(M*M)), tinymtparams, seed );
+#else
+    int total_dim_x = M;
+    int total_dim_y = M;
+    int grid_x = (total_dim_x + BLOCK_DIM - 1) / BLOCK_DIM;
+    int grid_y = (total_dim_y + BLOCK_DIM - 1) / BLOCK_DIM;
+    dim3 block_size = dim3(BLOCK_DIM, BLOCK_DIM);
+    dim3 grid_size = dim3(grid_x, grid_y, 1);
+    int num_states = grid_x * grid_y;
+    checkCudaErrors(cudaMalloc((void**)&devMTGPStates, num_states * sizeof(curandStateMtgp32)));
+    for (int i = 0; i < num_states; i++) {
+        checkCudaErrors(curandMakeMTGP32KernelState(devMTGPStates + i, mtgp32dc_params_fast_11213, devKernelParams, 1, seed + i));
+    }
+
+#endif
     
     for(int i=0; i < steps; ++i) {
         //run kernels
@@ -241,6 +298,7 @@ void TriangleDimerTiler::Walk(tiling &t, int steps, long seed) {
         int r2 = d2(generator);
         
         if(rFlipType == 0) { // Lozenge flips
+#ifndef __NVCC__
             if(r1==0) { //Horizontal Lozenges
                 // Rotate horizontal
                 RotateLozenges(cl::EnqueueArgs( queue, cl::NDRange(M,M)), tinymtparams, d_eH, M, r1, r2);
@@ -275,37 +333,120 @@ void TriangleDimerTiler::Walk(tiling &t, int steps, long seed) {
                 UpdateButterflysLFromLozenge(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_bL,d_eH,d_eL,d_eR,M);
                 UpdateButterflysRFromLozenge(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_bR,d_eH,d_eL,d_eR,M);
             }
-        } else if(rFlipType == 1) { // Triangle Flips
-            if(r2 == 1) { // Down triangles
-                // Rotate triangles
-                RotateTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)), tinymtparams, d_tD, M, r1);
-                // Update the triangles that flipped
-                UpdateTrianglesFlipped1(cl::EnqueueArgs( queue, cl::NDRange(M,M)), d_tD, M, r1);
-                // Update the rest of the triangles
-                UpdateTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_tD , d_tU, M, r2);
-                // Update Lozenge from triangles
-                UpdateLozengeHFromTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)), d_tU, d_tD, d_eH, M);
-                UpdateLozengeLFromTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)), d_tU, d_tD, d_eL, M);
-                UpdateLozengeRFromTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)), d_tU, d_tD, d_eR, M);
-                // Update Butterfly from lozenge
-                UpdateButterflysHFromLozenge(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_bH,d_eH,d_eL,d_eR,M);
-                UpdateButterflysLFromLozenge(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_bL,d_eH,d_eL,d_eR,M);
-                UpdateButterflysRFromLozenge(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_bR,d_eH,d_eL,d_eR,M);
-            } else { // Up triangles
-                RotateTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)), tinymtparams, d_tU, M, r1);
-                UpdateTrianglesFlipped0(cl::EnqueueArgs( queue, cl::NDRange(M,M)), d_tU, M, r1);
-                UpdateTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_tU , d_tD, M, r2);
-                UpdateLozengeHFromTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)), d_tU, d_tD, d_eH, M);
-                UpdateLozengeLFromTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)), d_tU, d_tD, d_eL, M);
-                UpdateLozengeRFromTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)), d_tU, d_tD, d_eR, M);
-                UpdateButterflysHFromLozenge(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_bH,d_eH,d_eL,d_eR,M);
-                UpdateButterflysLFromLozenge(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_bL,d_eH,d_eL,d_eR,M);
-                UpdateButterflysRFromLozenge(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_bR,d_eH,d_eL,d_eR,M);
+            if (!(i % 100000) && i != 0) {
+                queue.finish();
+                std::cout << "Walk step " << i << std::endl;
             }
+            else if (!(i % 10000) && i != 0) {
+                queue.flush();
+            }
+#else
+            if (r1 == 0) { //Horizontal Lozenges
+    // Rotate horizontal
+                RotateLozenges(block_size, grid_size, devMTGPStates, d_eH, M, r1, r2);
+                // Update those horizontal that rotated
+                UpdateLozengesFlipped(block_size, grid_size, d_eH, M, r1, r2);
+                // Update the rest of the lozenges
+                UpdateLozenges0(block_size, grid_size, d_eH, d_eL, d_eR, M);
+                // Update Up triangles
+                UpdateTriangleUFromLozenges(block_size, grid_size, d_eH, d_eL, d_tU, M);
+                // Update down triangles from up triangles
+                UpdateTriangles(block_size, grid_size, d_tU, d_tD, M, 0);
+                // Update butterfly from lozenges
+                UpdateButterflysHFromLozenge(block_size, grid_size, d_bH, d_eH, d_eL, d_eR, M);
+                UpdateButterflysLFromLozenge(block_size, grid_size, d_bL, d_eH, d_eL, d_eR, M);
+                UpdateButterflysRFromLozenge(block_size, grid_size, d_bR, d_eH, d_eL, d_eR, M);
+            }
+            else if (r1 == 1) { //Left Lozenges
+                RotateLozenges(block_size, grid_size, devMTGPStates, d_eL, M, r1, r2);
+                UpdateLozengesFlipped(block_size, grid_size, d_eL, M, r1, r2);
+                UpdateLozenges1(block_size, grid_size, d_eL, d_eR, d_eH, M);
+                UpdateTriangleUFromLozenges(block_size, grid_size, d_eH, d_eL, d_tU, M);
+                UpdateTriangles(block_size, grid_size, d_tU, d_tD, M, 0);
+                UpdateButterflysHFromLozenge(block_size, grid_size, d_bH, d_eH, d_eL, d_eR, M);
+                UpdateButterflysLFromLozenge(block_size, grid_size, d_bL, d_eH, d_eL, d_eR, M);
+                UpdateButterflysRFromLozenge(block_size, grid_size, d_bR, d_eH, d_eL, d_eR, M);
+            }
+            else {//Right Lozenges
+                RotateLozenges(block_size, grid_size, devMTGPStates, d_eR, M, r1, r2);
+                UpdateLozengesFlipped(block_size, grid_size, d_eR, M, r1, r2);
+                UpdateLozenges2(block_size, grid_size, d_eR, d_eH, d_eL, M);
+                UpdateTriangleUFromLozenges(block_size, grid_size, d_eH, d_eL, d_tU, M);
+                UpdateTriangles(block_size, grid_size, d_tU, d_tD, M, 0);
+                UpdateButterflysHFromLozenge(block_size, grid_size, d_bH, d_eH, d_eL, d_eR, M);
+                UpdateButterflysLFromLozenge(block_size, grid_size, d_bL, d_eH, d_eL, d_eR, M);
+                UpdateButterflysRFromLozenge(block_size, grid_size, d_bR, d_eH, d_eL, d_eR, M);
+            }
+#endif
+        } else if(rFlipType == 1) { // Triangle Flips
+#ifndef __NVCC__
+            if (r2 == 1) { // Down triangles
+    // Rotate triangles
+                RotateTriangles(cl::EnqueueArgs(queue, cl::NDRange(M, M)), tinymtparams, d_tD, M, r1);
+                // Update the triangles that flipped
+                UpdateTrianglesFlipped1(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_tD, M, r1);
+                // Update the rest of the triangles
+                UpdateTriangles(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_tD, d_tU, M, r2);
+                // Update Lozenge from triangles
+                UpdateLozengeHFromTriangles(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_tU, d_tD, d_eH, M);
+                UpdateLozengeLFromTriangles(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_tU, d_tD, d_eL, M);
+                UpdateLozengeRFromTriangles(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_tU, d_tD, d_eR, M);
+                // Update Butterfly from lozenge
+                UpdateButterflysHFromLozenge(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_bH, d_eH, d_eL, d_eR, M);
+                UpdateButterflysLFromLozenge(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_bL, d_eH, d_eL, d_eR, M);
+                UpdateButterflysRFromLozenge(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_bR, d_eH, d_eL, d_eR, M);
+            }
+            else { // Up triangles
+                RotateTriangles(cl::EnqueueArgs(queue, cl::NDRange(M, M)), tinymtparams, d_tU, M, r1);
+                UpdateTrianglesFlipped0(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_tU, M, r1);
+                UpdateTriangles(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_tU, d_tD, M, r2);
+                UpdateLozengeHFromTriangles(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_tU, d_tD, d_eH, M);
+                UpdateLozengeLFromTriangles(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_tU, d_tD, d_eL, M);
+                UpdateLozengeRFromTriangles(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_tU, d_tD, d_eR, M);
+                UpdateButterflysHFromLozenge(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_bH, d_eH, d_eL, d_eR, M);
+                UpdateButterflysLFromLozenge(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_bL, d_eH, d_eL, d_eR, M);
+                UpdateButterflysRFromLozenge(cl::EnqueueArgs(queue, cl::NDRange(M, M)), d_bR, d_eH, d_eL, d_eR, M);
+            }
+            if (!(i % 100000) && i != 0) {
+                queue.finish();
+                std::cout << "Walk step " << i << std::endl;
+            }
+            else if (!(i % 10000) && i != 0) {
+                queue.flush();
+            }
+#else
+            if (r2 == 1) { // Down triangles
+    // Rotate triangles
+                RotateTriangles(block_size, grid_size, devMTGPStates, d_tD, M, r1);
+                // Update the triangles that flipped
+                UpdateTrianglesFlipped1(block_size, grid_size, d_tD, M, r1);
+                // Update the rest of the triangles
+                UpdateTriangles(block_size, grid_size, d_tD, d_tU, M, r2);
+                // Update Lozenge from triangles
+                UpdateLozengeHFromTriangles(block_size, grid_size, d_tU, d_tD, d_eH, M);
+                UpdateLozengeLFromTriangles(block_size, grid_size, d_tU, d_tD, d_eL, M);
+                UpdateLozengeRFromTriangles(block_size, grid_size, d_tU, d_tD, d_eR, M);
+                // Update Butterfly from lozenge
+                UpdateButterflysHFromLozenge(block_size, grid_size, d_bH, d_eH, d_eL, d_eR, M);
+                UpdateButterflysLFromLozenge(block_size, grid_size, d_bL, d_eH, d_eL, d_eR, M);
+                UpdateButterflysRFromLozenge(block_size, grid_size, d_bR, d_eH, d_eL, d_eR, M);
+            }
+            else { // Up triangles
+                RotateTriangles(block_size, grid_size, devMTGPStates, d_tU, M, r1);
+                UpdateTrianglesFlipped0(block_size, grid_size, d_tU, M, r1);
+                UpdateTriangles(block_size, grid_size, d_tU, d_tD, M, r2);
+                UpdateLozengeHFromTriangles(block_size, grid_size, d_tU, d_tD, d_eH, M);
+                UpdateLozengeLFromTriangles(block_size, grid_size, d_tU, d_tD, d_eL, M);
+                UpdateLozengeRFromTriangles(block_size, grid_size, d_tU, d_tD, d_eR, M);
+                UpdateButterflysHFromLozenge(block_size, grid_size, d_bH, d_eH, d_eL, d_eR, M);
+                UpdateButterflysLFromLozenge(block_size, grid_size, d_bL, d_eH, d_eL, d_eR, M);
+                UpdateButterflysRFromLozenge(block_size, grid_size, d_bR, d_eH, d_eL, d_eR, M);
+            }
+#endif
         } else { // Butterfly Flips
             int p1 = d1(generator);
             int p2 = d2(generator);
-            
+#ifndef __NVCC__
             if(r1 == 0) { // Horizontal Butterflys
                 // Rotate Butterflys
                 RotateButterflys(cl::EnqueueArgs( queue, cl::NDRange(M,M)), tinymtparams, d_bH, M, r1, p1, p2);
@@ -345,10 +486,61 @@ void TriangleDimerTiler::Walk(tiling &t, int steps, long seed) {
                 UpdateTriangleUFromLozenges(cl::EnqueueArgs( queue, cl::NDRange(M,M)), d_eH, d_eL, d_tU, M);
                 UpdateTriangles(cl::EnqueueArgs( queue, cl::NDRange(M,M)),d_tU , d_tD, M, 0);
             }
+            if (!(i % 100000) && i != 0) {
+                queue.finish();
+                std::cout << "Walk step " << i << std::endl;
+            }
+            else if (!(i % 10000) && i != 0) {
+                queue.flush();
+            }
+#else
+            if (r1 == 0) { // Horizontal Butterflys
+    // Rotate Butterflys
+                RotateButterflys(block_size, grid_size, devMTGPStates, d_bH, M, r1, p1, p2);
+                // Series of kernels to update all the horizontal butterflys
+                UpdateButterflysFlippedH1(block_size, grid_size, d_bH, M, p1, p2);
+                UpdateButterflysFlippedH21(block_size, grid_size, d_bH, M, p1);
+                UpdateButterflysFlippedH22(block_size, grid_size, d_bH, M, p1);
+                UpdateButterflysFlippedH23(block_size, grid_size, d_bH, M, p1);
+                // Update lozenges from horizontal butterflys
+                UpdateLozengeFromButterflysH(block_size, grid_size, d_bH, d_eH, d_eL, d_eR, M);
+                // Update the rest of the butterflys from lozenge
+                UpdateButterflysLFromLozenge(block_size, grid_size, d_bL, d_eH, d_eL, d_eR, M);
+                UpdateButterflysRFromLozenge(block_size, grid_size, d_bR, d_eH, d_eL, d_eR, M);
+                // Update triangles from lozenge
+                UpdateTriangleUFromLozenges(block_size, grid_size, d_eH, d_eL, d_tU, M);
+                UpdateTriangles(block_size, grid_size, d_tU, d_tD, M, 0);
+            }
+            else if (r1 == 1) { // Left Butterflys
+                RotateButterflys(block_size, grid_size, devMTGPStates, d_bL, M, r1, p1, p2);
+                UpdateButterflysFlippedL1(block_size, grid_size, d_bL, M, p1, p2);
+                UpdateButterflysFlippedL21(block_size, grid_size, d_bL, M, p1);
+                UpdateButterflysFlippedL22(block_size, grid_size, d_bL, M, p1);
+                UpdateButterflysFlippedL23(block_size, grid_size, d_bL, M, p1);
+                UpdateLozengeFromButterflysL(block_size, grid_size, d_bL, d_eH, d_eL, d_eR, M);
+                UpdateButterflysHFromLozenge(block_size, grid_size, d_bH, d_eH, d_eL, d_eR, M);
+                UpdateButterflysRFromLozenge(block_size, grid_size, d_bR, d_eH, d_eL, d_eR, M);
+                UpdateTriangleUFromLozenges(block_size, grid_size, d_eH, d_eL, d_tU, M);
+                UpdateTriangles(block_size, grid_size, d_tU, d_tD, M, 0);
+            }
+            else { // Right Butterflys
+                RotateButterflys(block_size, grid_size, devMTGPStates, d_bR, M, r1, p1, p2);
+                UpdateButterflysFlippedR1(block_size, grid_size, d_bR, M, p1, p2);
+                UpdateButterflysFlippedR21(block_size, grid_size, d_bR, M, p1);
+                UpdateButterflysFlippedR22(block_size, grid_size, d_bR, M, p1);
+                UpdateButterflysFlippedR23(block_size, grid_size, d_bR, M, p1);
+                UpdateLozengeFromButterflysR(block_size, grid_size, d_bR, d_eH, d_eL, d_eR, M);
+                UpdateButterflysLFromLozenge(block_size, grid_size, d_bL, d_eH, d_eL, d_eR, M);
+                UpdateButterflysHFromLozenge(block_size, grid_size, d_bH, d_eH, d_eL, d_eR, M);
+                UpdateTriangleUFromLozenges(block_size, grid_size, d_eH, d_eL, d_tU, M);
+                UpdateTriangles(block_size, grid_size, d_tU, d_tD, M, 0);
+            }
+#endif
         }
         
     }
     
+#ifndef __NVCC__
     cl::copy(queue, d_eR, h_eR.begin(), h_eR.end());
     cl::copy(queue, d_eL, h_eL.begin(), h_eL.end());
     cl::copy(queue, d_eH, h_eH.begin(), h_eH.end());
@@ -357,6 +549,16 @@ void TriangleDimerTiler::Walk(tiling &t, int steps, long seed) {
     cl::copy(queue, d_bR, h_bR.begin(), h_bR.end());
     cl::copy(queue, d_bL, h_bL.begin(), h_bL.end());
     cl::copy(queue, d_bH, h_bH.begin(), h_bH.end());
+#else
+    checkCudaErrors(cudaMemcpy(h_eR.data(), d_eR, M * M * sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_eL.data(), d_eL, M* M * sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_eH.data(), d_eH, M* M * sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_tU.data(), d_tU, M* M * sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_tD.data(), d_tD, M* M * sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_bR.data(), d_bR, M* M * sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_bL.data(), d_bL, M* M * sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_bH.data(), d_bH, M* M * sizeof(int), cudaMemcpyDeviceToHost));
+#endif
 
     
     for(int i=0; i<N; ++i) { // combine vectors back into tile state
@@ -479,7 +681,17 @@ void TriangleDimerTiler::Walk(tiling &t, int steps, long seed) {
 //        }
 //        std::cout<<std::endl;
 //    }
-
+#ifdef __NVCC__
+    checkCudaErrors(cudaFree(d_eR));
+    checkCudaErrors(cudaFree(d_eL));
+    checkCudaErrors(cudaFree(d_eH));
+    checkCudaErrors(cudaFree(d_tU));
+    checkCudaErrors(cudaFree(d_tD));
+    checkCudaErrors(cudaFree(d_bR));
+    checkCudaErrors(cudaFree(d_bL));
+    checkCudaErrors(cudaFree(d_bH));
+    checkCudaErrors(cudaFree(devMTGPStates));
+#endif
 }
 
 tiling TriangleDimerTiler::IceCreamCone(int N, int M) {

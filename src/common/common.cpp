@@ -38,6 +38,7 @@ void UnPadMatrix(std::vector<int> &v, int M, int N) {
 }
 
 
+#ifndef __NVCC__
 void PrintOpenCLInfo()
 {
 	std::vector<cl::Platform> platforms;
@@ -77,6 +78,7 @@ void PrintOpenCLInfo()
 		std::cout<< std::endl;
 	}
 }
+#endif
 
 
 void SaveMatrix(const std::vector<int> &tiling, std::string filename) {
@@ -91,11 +93,14 @@ void PrintMatrix(const std::vector<int> &tiling ) {
 	PrintMatrix(tiling, sqrt(tiling.size()), sqrt(tiling.size()));
 }
 
+void PrintMatrix(const std::vector<double>& tiling, int sf) {
+	PrintMatrix(tiling, sqrt(tiling.size()), sqrt(tiling.size()), sf);
+}
+
+
 void SaveMatrix(const std::vector<double> &tiling, int M, int N, std::string filename) {
 
 	std::ofstream outputFile(filename.c_str());
-
-	std::string fs = "test.txt";
 
 	// save the domain to text file
 	for (int i=0; i<M; ++i){
@@ -137,6 +142,20 @@ void PrintMatrix(const std::vector<int> &tiling, int M, int N) {
 	}
 }
 
+void PrintMatrix(const std::vector<double>& tiling, int M, int N, int sf) {
+
+	for (int i = 0; i < M; ++i) {
+		for (int j = 0; j < N; ++j) {
+			if (tiling[i * N + j] < infty) {
+				printf("%*.1f ", sf+1, tiling[i * N + j]);
+			}
+			else
+				std::cout << std::string(sf + 2, ' ');
+		}
+		std::cout << "\n";
+	}
+}
+
 
 std::vector<int> LoadMatrix(std::string filename) {
 	std::vector<int> mat;
@@ -147,11 +166,10 @@ std::vector<int> LoadMatrix(std::string filename) {
 	}
 	char c;
 	int t = 0;
-
-	while (is.get(c) ) {
-		if ( c > 47 && c < 58 ) {
-			t = c-48;
-			while ( is.get(c) && c > 47 && c < 58 ) { t = 10*t + c-48; }
+	while (is.get(c)) {
+		if (c > 47 && c < 58) {
+			t = c - 48;
+			while (is.get(c) && c > 47 && c < 58) { t = 10 * t + c - 48; }
 			mat.push_back(t);
 		}
 	}
@@ -160,6 +178,8 @@ std::vector<int> LoadMatrix(std::string filename) {
 	return mat;
 }
 
+
+#ifndef __NVCC__
 cl::Program LoadCLProgram(cl::Context context, std::vector<cl::Device> devices,std::string input) {
 
 	std::ifstream sourceFile(input.c_str());
@@ -193,5 +213,5 @@ cl::Program LoadCLProgram(cl::Context context, std::vector<cl::Device> devices,s
 
 	return program;
 }
-
+#endif
 

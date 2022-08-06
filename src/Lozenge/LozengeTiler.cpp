@@ -6,7 +6,16 @@
 #include <queue>
 #include <random>
 #include "../common/common.h"
+#ifndef __NVCC__
 #include "../TinyMT/file_reader.h"
+#else
+#include <cuda_runtime.h>
+#include <curand.h>
+#include "lozengekernel.cuh"
+#include "../common/helper_cuda.h"
+#include <curand_mtgp32_host.h>
+#include <curand_mtgp32dc_p_11213.h>
+#endif
 
 
 const int neighbors[6][2] = {{0,1},{-1,1},{-1,0},{0,-1},{1,-1},{1,0}};
@@ -37,14 +46,41 @@ void LozengeTiler::Walk(tiling &t, int steps, long seed) {
             }
         }
     }
- 
+
+#ifndef __NVCC__
     // To the buffer!
     cl::Buffer d_vR = cl::Buffer(context, h_vR.begin(), h_vR.end(), CL_FALSE);
     cl::Buffer d_vB = cl::Buffer(context, h_vB.begin(), h_vB.end(), CL_FALSE);
     cl::Buffer d_vG = cl::Buffer(context, h_vG.begin(), h_vG.end(), CL_FALSE);
-    
+#else
+	char* d_vR;
+	char* d_vB;
+	char* d_vG;
+	checkCudaErrors(cudaMalloc((void**)&d_vR, N * M * sizeof(char)));
+	checkCudaErrors(cudaMemcpy(d_vR, h_vR.data(), N * M * sizeof(char), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMalloc((void**)&d_vB, N * M * sizeof(char)));
+	checkCudaErrors(cudaMemcpy(d_vB, h_vB.data(), N * M * sizeof(char), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMalloc((void**)&d_vG, N * M * sizeof(char)));
+	checkCudaErrors(cudaMemcpy(d_vG, h_vG.data(), N * M * sizeof(char), cudaMemcpyHostToDevice));
+#endif
+
     // TinyMT
+#ifndef __NVCC__
 	InitTinyMT( cl::EnqueueArgs(queue, cl::NDRange(N*(N/3))), tinymtparams, seed );
+#else
+	int total_dim_x = N;
+	int total_dim_y = N / 3;
+	int grid_x = (total_dim_x + BLOCK_DIM - 1) / BLOCK_DIM;
+	int grid_y = (total_dim_y + BLOCK_DIM - 1) / BLOCK_DIM;
+	dim3 block_size = dim3(BLOCK_DIM, BLOCK_DIM);
+	dim3 grid_size = dim3(grid_x, grid_y, 1);
+	int num_states = grid_x * grid_y;
+	checkCudaErrors(cudaMalloc((void**)&devMTGPStates, num_states * sizeof(curandStateMtgp32)));
+	for (int i = 0; i < num_states; i++) {
+		checkCudaErrors(curandMakeMTGP32KernelState(devMTGPStates + i, mtgp32dc_params_fast_11213, devKernelParams, 1, seed + i));
+	}
+
+#endif
     
     // MCMC
     std::default_random_engine generator;
@@ -54,6 +90,8 @@ void LozengeTiler::Walk(tiling &t, int steps, long seed) {
 	for(int i=0; i < steps; ++i) {
         int r = distribution(generator);
         //std::cout<<r<<std::endl;
+
+#ifndef __NVCC__
         if (r == 0) {
             RotateTiles( cl::EnqueueArgs(queue, cl::NDRange(N,N/3)), tinymtparams, d_vR, N);
             UpdateTiles( cl::EnqueueArgs(queue, cl::NDRange(N,N/3)), d_vR, d_vB, d_vG, N, 0);
@@ -64,13 +102,39 @@ void LozengeTiler::Walk(tiling &t, int steps, long seed) {
             RotateTiles( cl::EnqueueArgs(queue, cl::NDRange(N,N/3)), tinymtparams, d_vG, N);
             UpdateTiles( cl::EnqueueArgs(queue, cl::NDRange(N,N/3)), d_vG, d_vR, d_vB, N, 2);
         }
-		
+		if (!(i % 100000) && i != 0) {
+			queue.finish();
+			std::cout << "Walk step " << i << std::endl;
+		}
+		else if (!(i % 10000) && i != 0) {
+			queue.flush();
+		}
+#else
+		if (r == 0) {
+			RotateTiles(block_size, grid_size, devMTGPStates, d_vR, N);
+			UpdateTiles(block_size, grid_size, d_vR, d_vB, d_vG, N, 0);
+		}
+		else if (r == 1) {
+			RotateTiles(block_size, grid_size, devMTGPStates, d_vB, N);
+			UpdateTiles(block_size, grid_size, d_vB, d_vG, d_vR, N, 1);
+		}
+		else {
+			RotateTiles(block_size, grid_size, devMTGPStates, d_vG, N);
+			UpdateTiles(block_size, grid_size, d_vG, d_vR, d_vB, N, 2);
+		}
+#endif
 	}
     
     // Copy back to the host
+#ifndef __NVCC__
     cl::copy(queue, d_vR, h_vR.begin(), h_vR.end());
     cl::copy(queue, d_vB, h_vB.begin(), h_vB.end());
     cl::copy(queue, d_vG, h_vG.begin(), h_vG.end());
+#else
+	checkCudaErrors(cudaMemcpy(h_vR.data(), d_vR, (N / 3) * N * sizeof(char), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(h_vB.data(), d_vB, (N / 3) * N * sizeof(char), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(h_vG.data(), d_vG, (N / 3) * N * sizeof(char), cudaMemcpyDeviceToHost));
+#endif
 	
     // Recombine into tiling
     for(int i=0; i<N; ++i) {
@@ -85,12 +149,26 @@ void LozengeTiler::Walk(tiling &t, int steps, long seed) {
         }
     }
 
+#ifdef __NVCC__
+	checkCudaErrors(cudaFree(d_vR));
+	checkCudaErrors(cudaFree(d_vB));
+	checkCudaErrors(cudaFree(d_vG));
+	checkCudaErrors(cudaFree(devMTGPStates));
+#endif
+
 }
 
-
+#ifndef __NVCC__
 void LozengeTiler::LoadTinyMT(std::string params, int size) {
 	tinymtparams = get_params_buffer(params, context, queue, size);
 }
+#else
+void LozengeTiler::LoadMTGP() {
+	checkCudaErrors(cudaMalloc((void**)&devKernelParams, sizeof(mtgp32_kernel_params)));
+	checkCudaErrors(curandMakeMTGP32Constants(mtgp32dc_params_fast_11213, devKernelParams));
+}
+#endif
+
 
 heightfunc LozengeTiler::TilingToHeightfunc(const tiling &t, const domain &d) {
 	int N = sqrt(t.size());

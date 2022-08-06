@@ -9,6 +9,9 @@
 #define TRIANGLEDIMER_TRIANGLEDIMERTILER_H_
 
 #include "../common/common.h"
+#ifdef __NVCC__
+#include <curand_mtgp32.h>
+#endif
 
 // There are three types of moves for our MCMC: Lozenge, Triangle, and Butterfly (see Perfect matchings in the triangular lattice - Kenyon, Remila). For each type of move, we have an array which, in each element, stores enough information about local state of the tiling to determine whether or not such a move can be executed. This is described below:
 //
@@ -72,6 +75,7 @@
 class TriangleDimerTiler {
 
 private:
+#ifndef __NVCC__
 	cl::Context context;
 	cl::CommandQueue queue;
 	cl::Program program;
@@ -109,9 +113,13 @@ private:
     cl::make_kernel<cl::Buffer, cl::Buffer, cl::Buffer, cl::Buffer, const int> UpdateLozengeFromButterflysL;
     cl::make_kernel<cl::Buffer, cl::Buffer, cl::Buffer, cl::Buffer, const int> UpdateLozengeFromButterflysR;
 	cl::Buffer tinymtparams;
+#else
+    mtgp32_kernel_params* devKernelParams;
+    curandStateMtgp32* devMTGPStates;
+#endif
 
 public:
-    
+#ifndef __NVCC__
     // The constructor takes care of loading and compiling the program source.
     TriangleDimerTiler(cl::Context context0, cl::CommandQueue queue0, std::vector<cl::Device> devices, std::string source, cl_int &err) :
     	context(context0),
@@ -172,9 +180,16 @@ public:
         UpdateLozengeFromButterflysH(program,"UpdateLozengeFromButterflysH"),
         UpdateLozengeFromButterflysL(program,"UpdateLozengeFromButterflysL"),
         UpdateLozengeFromButterflysR(program,"UpdateLozengeFromButterflysR") { };
+#else
+    TriangleDimerTiler() = default;
+#endif
 
+#ifndef __NVCC__
     // TinyMT
     void LoadTinyMT(std::string params, int size);
+#else 
+    void LoadMTGP();
+#endif
     
     // Random Walk
     void Walk(tiling &t, int steps, long seed);

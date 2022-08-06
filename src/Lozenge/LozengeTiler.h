@@ -3,7 +3,9 @@
 #define LOZENGE_LOZENGETILER_H_
 
 #include "../common/common.h"
-
+#ifdef __NVCC__
+#include <curand_mtgp32.h>
+#endif
 
 // The domain of a lozenge tiling is a union of triangles on the triangular lattice.
 // The domain is specified by a 2*N^2 dimension arrays of 0 and 1. See example for details.
@@ -35,6 +37,7 @@
 class LozengeTiler {
 
 private:
+#ifndef __NVCC__
 	cl::Context context;
 	cl::CommandQueue queue;
 	cl::Program program;
@@ -42,8 +45,13 @@ private:
     cl::make_kernel<cl::Buffer, cl::Buffer, const int> RotateTiles;
     cl::make_kernel<cl::Buffer, cl::Buffer, cl::Buffer, const int, const int> UpdateTiles;
 	cl::Buffer tinymtparams;
+#else
+    mtgp32_kernel_params* devKernelParams;
+    curandStateMtgp32* devMTGPStates;
+#endif
 
 public:
+#ifndef __NVCC__
     LozengeTiler(cl::Context context0, cl::CommandQueue queue0, std::vector<cl::Device> devices, std::string source, cl_int &err) :
     	context(context0),
 		queue(queue0),
@@ -51,12 +59,18 @@ public:
 		InitTinyMT(program, "InitTinyMT"),
 		RotateTiles(program, "RotateTiles"),
 		UpdateTiles(program, "UpdateTiles") { };
+#else
+    LozengeTiler() = default;
+#endif
 
 	// All of the following functions are almost identical to Domino.
 	// Take a look at DominoTiler.h.
 	
+#ifndef __NVCC__
     void LoadTinyMT(std::string params, int size);
-	
+#else 
+    void LoadMTGP();
+#endif
 
     void Walk(tiling &t, int samples, long seed);
 	
